@@ -490,8 +490,10 @@ def build_get_url(base_url, params):
 
 def dump(obj, prefix=''):
     '''Utility function to print to standard output a generic object with all its attributes.'''
-
-    print("%s %s.%s : %s" % (prefix, obj.__module__, obj.__class__.__name__, obj.__dict__))
+    if isinstance(obj, str):
+        print("%s : %s" % (prefix, obj))
+    else:
+        print("%s %s.%s : %s" % (prefix, obj.__module__, obj.__class__.__name__, obj.__dict__))
 
 def getTypedValue(data_type, value):
     '''Utility function to cast a string value to the appropriate XSD type. '''
