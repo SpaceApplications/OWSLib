@@ -917,24 +917,23 @@ class WPSExecution():
         """
 
         reader = WPSExecuteReader(verbose=self.verbose)
-
         if response is None:
             # override status location
             if url is not None:
                 self.resultLocation = url
             log.info('\nFetching execution results... (location=%s)' %
                      self.resultLocation)
-            response = reader.readFromUrl(
-                self.resultLocation, username=self.username, password=self.password)
-        else:
+            if self.resultLocation:
+		response = reader.readFromUrl(self.resultLocation, username=self.username, password=self.password)
+            else:
+		log.debug('resultLocation is None')
+        if response:
             response = reader.readFromString(response)
-
-        # store latest response
-        self.response = etree.tostring(response)
-        log.debug(self.response)
-        #print ("#### getResult(), request=%s, response=%s" % (self.resultLocation, self.response))
-
-        self.parseResponse(response)
+            # store latest response
+            self.response = etree.tostring(response)
+            log.debug(self.response)
+            #print ("#### getResult(), request=%s, response=%s" % (self.resultLocation, self.response))
+            self.parseResponse(response)
 
     def getOutput(self, filepath=None):
         """
@@ -1239,26 +1238,28 @@ class DataFormat(object):
             self.transmission = transmission
             self.version = version
         else:
-            #dump(self.data_format, prefix='\t\t*** Format before: ')
-            self.mimeType = mimeType if mimeType is not None else data_format.mimeType
-            self.encoding = encoding if encoding is not None else data_format.encoding
-            self.schema = schema if schema is not None else data_format.schema
-            self.maximumMegabytes = maximumMegabytes if maximumMegabytes is not None else data_format.maximumMegabytes
-            self.transmission = transmission if transmission is not None else data_format.transmission
-            self.version = version if version is not None else data_format.version
+            pass
+	    #dump(self.data_format, prefix='\t\t*** Format before: ')
+            # NOTE: datatype introduced by BV are simple strings and therefore have no mimetype, encoding, .. attributes
+	    #self.mimeType = mimeType if mimeType is not None else data_format.mimeType
+            #self.encoding = encoding if encoding is not None else data_format.encoding
+            #self.schema = schema if schema is not None else data_format.schema
+            #self.maximumMegabytes = maximumMegabytes if maximumMegabytes is not None else data_format.maximumMegabytes
+            #self.transmission = transmission if transmission is not None else data_format.transmission
+            #self.version = version if version is not None else data_format.version
 
-        if self.mimeType is None:
-            self.mimeType = ''
-        if self.encoding is None:
-            self.encoding = ''
-        if self.schema is None:
-            self.schema = ''
-        if self.maximumMegabytes is None:
-            self.maximumMegabytes = 0
-        if self.transmission is None:
-            self.transmission = 'value'
-        if self.version is None:
-            self.version = WPS_DEFAULT_VERSION
+        #if self.mimeType is None:
+        self.mimeType = ''
+        #if self.encoding is None:
+        self.encoding = ''
+        #if self.schema is None:
+        self.schema = ''
+        #if self.maximumMegabytes is None:
+        self.maximumMegabytes = 0
+        #if self.transmission is None:
+        self.transmission = 'value'
+        #if self.version is None:
+        self.version = WPS_DEFAULT_VERSION
 
         #dump(self, prefix='\t\t*** Format after: ')
 
