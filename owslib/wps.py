@@ -2001,7 +2001,6 @@ class Process(object):
 
         # WPS 2.0.0
         # {<wps:Output>..</wps:Output>}
-        self.processOutputs = []
         for outputElement in elem.findall(nspath('Output', ns=wpsns)):
             #print ("process output element: %s" % outputElement)
             self.processOutputs.append(Output(outputElement))
