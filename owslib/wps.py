@@ -924,9 +924,9 @@ class WPSExecution():
             log.info('\nFetching execution results... (location=%s)' %
                      self.resultLocation)
             if self.resultLocation:
-		response = reader.readFromUrl(self.resultLocation, username=self.username, password=self.password)
+                response = reader.readFromUrl(self.resultLocation, username=self.username, password=self.password)
             else:
-		log.debug('resultLocation is None')
+                log.debug('resultLocation is None')
         if response:
             response = reader.readFromString(response)
             # store latest response
