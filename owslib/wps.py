@@ -234,7 +234,7 @@ class WebProcessingService(object):
         self.url = url
         self.username = username
         self.password = password
-        self.version = version
+        self._setversion(version)
         self.verbose = verbose
         self.auth_token = auth_token
         self.headers = headers
@@ -246,14 +246,24 @@ class WebProcessingService(object):
         self.operations = []
         self.processes = []
 
-        if self.version == "2.0.0":
-            namespaces['wps'] = n.get_namespace('wps200')
-            namespaces['ows'] = n.get_namespace('ows200')
 
         if not skip_caps:
             self.getcapabilities()
 
         print ("WPS version: %s (Verbose: %s)" % (self.version, self.verbose))
+
+
+    def _setversion(self, version):
+        """
+        Set the WPS service version and adapt the namespaces accordingly
+        """
+        self.version = version
+        if self.version == "1.0.0":
+            namespaces['wps'] = n.get_namespace('wps')
+            namespaces['ows'] = DEFAULT_OWS_NAMESPACE  #n.get_namespace('ows')
+        else:
+            namespaces['wps'] = n.get_namespace('wps200')
+            namespaces['ows'] = n.get_namespace('ows200')
 
 
     def getcapabilities(self, xml=None):
@@ -276,6 +286,8 @@ class WebProcessingService(object):
 
         # populate the capabilities metadata obects from the XML tree
         self._parseCapabilitiesMetadata(self._capabilities)
+        # good opportunity to initialize the service type version
+        self._setversion(self.identification.version)
 
     def describeprocess(self, identifier, xml=None):
         """
@@ -520,8 +532,7 @@ class WPSCapabilitiesReader(WPSReader):
         username, password: optional user credentials
         """
         return self._readFromUrl(url,
-                                 {'service': 'WPS', 'request':
-                                     'GetCapabilities', 'version': self.version},
+                                 {'service': 'WPS', 'request': 'GetCapabilities' },  #, 'version': self.version},
                                  username=username, password=password)
 
 
@@ -642,6 +653,7 @@ class WPSExecution():
 
         if self.version == '1.0.0':
             wps_default_schema_location = WPS_DEFAULT_SCHEMA_LOCATION_WPS100
+            #print('###### OUTPUT: %s' % output)
             self.mode = 'sync' if not output else 'async'
         else:
             wps_default_schema_location = WPS_DEFAULT_SCHEMA_LOCATION_WPS200
@@ -692,9 +704,7 @@ class WPSExecution():
 
             # WPS 2.0.0
             # <wps:Input id="processIdentifier">
-            #   <wps:Data mimeType="text/plain">
-            #     <wps:LiteralValue>DetectBurnedAreas</wps:LiteralValue>
-            #   </wps:Data>
+            #   <wps:Data mimeType="text/plain">DetectBurnedAreas</wps:Data>
             # </wps:Input>
 
             # <wps:Input id="DISTANCE">
@@ -709,8 +719,7 @@ class WPSExecution():
                     literalDataElement = etree.SubElement(
                         dataElement, nspath_eval('wps:LiteralData', namespaces))
                 else:
-                    literalDataElement = etree.SubElement(
-                        dataElement, nspath_eval('wps:LiteralValue', namespaces))
+                    literalDataElement = dataElement
                 literalDataElement.text = val
 
             elif isinstance(val, LiteralDataInput):
@@ -718,17 +727,21 @@ class WPSExecution():
                 dataElement = etree.SubElement(
                     inputElement, nspath_eval('wps:Data', namespaces))
                 # TODO: Check if the mimetype attribute may also be included in WPS 1.0.0
-                dataElement.set('mimeType', val.mimeType)
-                dataElement.set('encoding', val.encoding)
-                dataElement.set('schema', val.schema)
+                if val.mimeType:
+                    dataElement.set('mimeType', val.mimeType)
+                if val.encoding:
+                    dataElement.set('encoding', val.encoding)
+                if val.schema:
+                    dataElement.set('schema', val.schema)
                 
                 if self.version == "1.0.0":
                     literalDataElement = etree.SubElement(
                         dataElement, nspath_eval('wps:LiteralData', namespaces))
                 else:
                     # TODO: WPS 2.0.0 is ambiguous as it contains an example execute request with this <wps:LiteralValue> element
-                    literalDataElement = etree.SubElement(
-                        dataElement, nspath_eval('wps:LiteralValue', namespaces))
+                    #literalDataElement = etree.SubElement(
+                    #    dataElement, nspath_eval('wps:LiteralValue', namespaces))
+                    literalDataElement = dataElement
                 literalDataElement.text = val.value
 
             # WPS 2.0.0
@@ -777,9 +790,14 @@ class WPSExecution():
                 self._add_output(
                     responseDocumentElement, output, asReference=True)
             elif isinstance(output, list):
-                for (identifier, as_reference) in output:
-                    self._add_output(
-                        responseDocumentElement, identifier, asReference=as_reference)
+                if len(output) > 0 and isinstance(output[0], Output):
+                    for out in output:
+                        self._add_output(
+                            responseDocumentElement, out.identifier, asReference=False)
+                else:
+                    for (identifier, as_reference) in output:
+                        self._add_output(
+                            responseDocumentElement, identifier, asReference=as_reference)
             else:
                 raise Exception(
                     'output parameter is neither string nor list. output=%s' % output)
@@ -802,18 +820,23 @@ class WPSExecution():
                 outputs = self.processOutputs
             for output in outputs:
                 #dump(output, prefix="\tOUTPUT: ")
-
+                log.debug("Output: %s", output)
                 if isinstance(output, Output):
                     default_format = output.defaultValue
-                    #dump(default_format, prefix="\tUTPUT DEFAULT FORMAT: ")
+                    #dump(default_format, prefix="\tOUTPUT DEFAULT FORMAT: ")
                     if default_format:
                         attrs = {
                             'id': output.identifier,
-                            'dataTransmissionMode': default_format.transmission if default_format.transmission is not None else 'value',
-                            'mimeType': default_format.mimeType if default_format.transmission is not None else 'TBD',
-                            'schema': default_format.schema if default_format.transmission is not None else 'TBD2',
-                            'encoding': default_format.encoding if default_format.transmission is not None else 'UTF-8',
+                            'transmission': 'reference'
                         }
+                        if default_format.transmission:
+                            attrs['transmission'] = default_format.transmission
+                        if default_format.encoding:
+                            attrs['encoding'] = default_format.encoding
+                        if default_format.schema:
+                            attrs['schema'] = default_format.schema
+                        if default_format.mimeType:
+                            attrs['mimeType'] = default_format.mimeType
                     else:
                         attrs = {
                             'id': output.identifier,
@@ -821,19 +844,27 @@ class WPSExecution():
                     outputElement = etree.SubElement(root, nspath_eval('wps:Output', namespaces), attrib=attrs)
                 elif isinstance(output, str):
                     attrs = {
-                        'id': output, 'dataTransmissionMode': 'reference',
-                        'mimeType': '', 'schema': '', 'encoding': ''
+                        'id': output,
+                        'transmission': 'reference'
+                    }
+                    outputElement = etree.SubElement(root, nspath_eval('wps:Output', namespaces), attrib=attrs)
+                elif isinstance(output, tuple):
+                    (identifier, as_reference) = output
+                    attrs = {
+                        'id': identifier,
+                        'transmission': 'reference' if as_reference else 'value'
                     }
                     outputElement = etree.SubElement(root, nspath_eval('wps:Output', namespaces), attrib=attrs)
                 elif isinstance(output, list):
-                    for (identifier, as_reference) in output:
+                    for (identifier, as_reference, mime_type) in output:
                         attrs = {
-                            'id': identifier, 'dataTransmissionMode': 'reference' if as_reference else 'value',
-                            'mimeType': '', 'schema': '', 'encoding': ''
+                            'id': identifier,
+                            'transmission': 'reference',
+                            'mimeType': mime_type
                         }
                         outputElement = etree.SubElement(root, nspath_eval('wps:Output', namespaces), attrib=attrs)
                 else:
-                    raise Exception('output parameter is neither string nor list. output=%s' % output)
+                    raise Exception('output parameter is neither string, tuple or list. output=%s' % output)
 
         return root
 
@@ -917,7 +948,11 @@ class WPSExecution():
         """
 
         reader = WPSExecuteReader(verbose=self.verbose)
-        if response is None:
+
+        if response is not None:
+            # A response string was provided as parameter
+            response = reader.readFromString(response)
+        else:
             # override status location
             if url is not None:
                 self.resultLocation = url
@@ -927,10 +962,11 @@ class WPSExecution():
                 response = reader.readFromUrl(self.resultLocation, username=self.username, password=self.password)
             else:
                 log.debug('resultLocation is None')
-        if response:
-            response = reader.readFromString(response)
+
+        if response is not None:
             # store latest response
             self.response = etree.tostring(response)
+            #print("#### Response: %s" % self.response)
             log.debug(self.response)
             #print ("#### getResult(), request=%s, response=%s" % (self.resultLocation, self.response))
             self.parseResponse(response)
@@ -1017,6 +1053,8 @@ class WPSExecution():
         # Asynchronous call response. See example in _parseStatusInfo(), below.
         elif rootTag == 'StatusInfo':
             self._parseStatusInfo(response)
+            if 'Failed' in self.status:
+                self.getResult()
 
         # <ns0:ExecuteResponse>
         elif rootTag == 'ExecuteResponse':
@@ -1033,9 +1071,9 @@ class WPSExecution():
             log.debug('Unknown Response')
 
         if self.verbose:
-            print ('Status=%s, Percent completed=%s, Message=%s' % (self.status, self.percentCompleted, self.statusMessage))
-            print ('Job ID=%s, Expiration date=%s, Next poll=%s' % (self.jobId, self.expirationDate, self.nextPoll))
-            print ('Status location=%s, Result location=%s' % (self.statusLocation, self.resultLocation))
+            print('Status=%s, Percent completed=%s, Message=%s' % (self.status, self.percentCompleted, self.statusMessage))
+            print('Job ID=%s, Expiration date=%s, Next poll=%s' % (self.jobId, self.expirationDate, self.nextPoll))
+            print('Status location=%s, Result location=%s' % (self.statusLocation, self.resultLocation))
             for error in self.errors:
                 print ('   Error code=%s, locator=%s, text=%s' % (error.code, error.locator, error.text))
 
@@ -1238,28 +1276,27 @@ class DataFormat(object):
             self.transmission = transmission
             self.version = version
         else:
-            pass
-	    #dump(self.data_format, prefix='\t\t*** Format before: ')
-            # NOTE: datatype introduced by BV are simple strings and therefore have no mimetype, encoding, .. attributes
-	    #self.mimeType = mimeType if mimeType is not None else data_format.mimeType
-            #self.encoding = encoding if encoding is not None else data_format.encoding
-            #self.schema = schema if schema is not None else data_format.schema
-            #self.maximumMegabytes = maximumMegabytes if maximumMegabytes is not None else data_format.maximumMegabytes
-            #self.transmission = transmission if transmission is not None else data_format.transmission
-            #self.version = version if version is not None else data_format.version
+            log.debug("DataFormat: %s, %s, %s, %s, %s, %s, %s", data_format, mimeType, encoding, schema, maximumMegabytes, transmission, version)
+            #dump(self.data_format, prefix='\t\t*** Format before: ')
+            self.mimeType = mimeType if mimeType is not None else data_format.mimeType
+            self.encoding = encoding if encoding is not None else data_format.encoding
+            self.schema = schema if schema is not None else data_format.schema
+            self.maximumMegabytes = maximumMegabytes if maximumMegabytes is not None else data_format.maximumMegabytes
+            self.transmission = transmission if transmission is not None else data_format.transmission
+            self.version = version if version is not None else data_format.version
 
-        #if self.mimeType is None:
-        self.mimeType = ''
-        #if self.encoding is None:
-        self.encoding = ''
-        #if self.schema is None:
-        self.schema = ''
-        #if self.maximumMegabytes is None:
-        self.maximumMegabytes = 0
-        #if self.transmission is None:
-        self.transmission = 'value'
-        #if self.version is None:
-        self.version = WPS_DEFAULT_VERSION
+        if self.mimeType is None:
+            self.mimeType = ''
+        if self.encoding is None:
+            self.encoding = ''
+        if self.schema is None:
+            self.schema = ''
+        if self.maximumMegabytes is None:
+            self.maximumMegabytes = 0
+        if self.transmission is None:
+            self.transmission = 'value'
+        if self.version is None:
+            self.version = WPS_DEFAULT_VERSION
 
         #dump(self, prefix='\t\t*** Format after: ')
 
@@ -1666,6 +1703,7 @@ class Output(InputOutput):
 
     def __init__(self, outputElement):
 
+        self.identifier = None
         self.reference = ''
         self.mimeType = None
         self.encoding = None
@@ -1689,6 +1727,12 @@ class Output(InputOutput):
                 # WPS 2.0.0 uses 'xlink:href'
                 self.reference = referenceElement.get(nspath('href', ns=namespaces['xlink']))
             self.mimeType = referenceElement.get('mimeType')
+
+        # WPS 1.0.0: The identifier is in <ProcessOutputs><Output><ows:Identifier>
+        identifierElement = etree.SubElement(outputElement, nspath_eval('ows:Identifier', namespaces))
+        if identifierElement is not None:
+            pass
+            ############## self.identifier = identifierElement.
 
         # WPS 2.0.0: In <wps:Result><wps:Output> the identifier is in the "id" attribute
         if self.identifier == None:
@@ -1990,9 +2034,9 @@ class Process(object):
                 dump(self.dataInputs[-1], prefix='\tInput: ')
                 dump(self.dataInputs[-1].defaultValue, prefix='\t\tDefault format: ')
 
+        self.processOutputs = []
         # WPS 1.0.0
         # <ProcessOutputs>{<Output>...</Output>}</ProcessOutputs>
-        self.processOutputs = []
         for outputElement in elem.findall('ProcessOutputs/Output'):
             self.processOutputs.append(Output(outputElement))
             if self.verbose == True:
@@ -2036,6 +2080,12 @@ class ComplexDataInput(IComplexDataInput, DataFormat):
         """
         refElement = etree.Element(nspath_eval('wps:Reference', namespaces),
                                    attrib={nspath_eval("xlink:href", namespaces): self.value})
+        if self.encoding:
+            refElement.set('encoding', self.encoding)
+        if self.schema:
+            refElement.set('schema', self.schema)
+        if self.mimeType:
+            refElement.set('mimeType', self.mimeType)
         return refElement
 
     def complexDataRaw(self):
@@ -2071,11 +2121,11 @@ class ComplexDataInput(IComplexDataInput, DataFormat):
             xml_input_data = etree.fromstring(self.value)
             complexDataElement.append(xml_input_data)
         # If not valid XML, append the text in a CDATA
-        #except etree.XMLSyntaxError:
-        except Exception as ex:
+        except etree.XMLSyntaxError as ex:
             print ("Data: %s" % self.value)
-            print ("Exception: %s" % ex)
-            complexDataElement.text = etree.CDATA( self.value )
+            print ("Warning: %s => Enclosing it as CDATA" % ex)
+            #complexDataElement.text = etree.CDATA(self.value)
+            complexDataElement.text = self.value
 
         return dataElement
 
@@ -2385,3 +2435,4 @@ def printInputOutput(value, indent=''):
               (indent, value.reference, value.mimeType))
         for datum in value.data:
             print('%s Data Format: %s' % (indent, printValue(datum)))
+

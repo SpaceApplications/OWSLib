@@ -161,7 +161,7 @@ def openURL(url_base, data=None, method='Get', cookies=None, username=None, pass
 
     if method.lower() == 'post':
         try:
-            xml = etree.fromstring(data)
+            etree.fromstring(data)
             headers['Content-Type'] = 'text/xml'
         except (ParseError, UnicodeEncodeError):
             pass
@@ -268,7 +268,7 @@ def add_namespaces(root, ns_keys):
         existing_namespaces = set()
         for elem in root.getiterator():
             if elem.tag[0] == "{":
-                uri, tag = elem.tag[1:].split("}")
+                uri, _ = elem.tag[1:].split("}")
                 existing_namespaces.add(namespaces.get_namespace_from_url(uri))
         for key, link in ns_keys:
             if link is not None and key not in existing_namespaces:
@@ -493,7 +493,7 @@ def dump(obj, prefix=''):
     try:
         print("%s %s.%s : %s" % (prefix, obj.__module__, obj.__class__.__name__, obj.__dict__))
     except AttributeError:
-        print("%s : %s" % (prefix, obj))
+		print("%s : %s" % (prefix, obj))
 
 def getTypedValue(data_type, value):
     '''Utility function to cast a string value to the appropriate XSD type. '''
