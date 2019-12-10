@@ -493,7 +493,7 @@ def dump(obj, prefix=''):
     try:
         print("%s %s.%s : %s" % (prefix, obj.__module__, obj.__class__.__name__, obj.__dict__))
     except AttributeError:
-		print("%s : %s" % (prefix, obj))
+        print("%s : %s" % (prefix, obj))
 
 def getTypedValue(data_type, value):
     '''Utility function to cast a string value to the appropriate XSD type. '''
