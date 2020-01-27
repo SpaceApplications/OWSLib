@@ -280,7 +280,7 @@ class WebProcessingService(object):
             self._capabilities = reader.readFromString(xml)
         else:
             self._capabilities = reader.readFromUrl(
-                self.url, username=self.username, password=self.password)
+                self.url, username=self.username, password=self.password, headers=self.headers)
 
         log.debug(element_to_string(self._capabilities))
 
@@ -303,7 +303,7 @@ class WebProcessingService(object):
             rootElement = reader.readFromString(xml)
         else:
             # read from server
-            rootElement = reader.readFromUrl(self.url, identifier)
+            rootElement = reader.readFromUrl(self.url, identifier, headers=self.headers)
 
         log.info(element_to_string(rootElement))
 
@@ -525,7 +525,7 @@ class WPSCapabilitiesReader(WPSReader):
         super(WPSCapabilitiesReader, self).__init__(
             version=version, verbose=verbose)
 
-    def readFromUrl(self, url, username=None, password=None):
+    def readFromUrl(self, url, username=None, password=None, headers=None):
         """
         Method to get and parse a WPS capabilities document, returning an elementtree instance.
         url: WPS service base url, to which is appended the HTTP parameters: service, version, and request.
@@ -533,7 +533,7 @@ class WPSCapabilitiesReader(WPSReader):
         """
         return self._readFromUrl(url,
                                  {'service': 'WPS', 'request': 'GetCapabilities' },  #, 'version': self.version},
-                                 username=username, password=password)
+                                 username=username, password=password, headers=headers)
 
 
 class WPSDescribeProcessReader(WPSReader):
@@ -546,7 +546,7 @@ class WPSDescribeProcessReader(WPSReader):
         # superclass initializer
         super(WPSDescribeProcessReader, self).__init__(version=version, verbose=verbose)
 
-    def readFromUrl(self, url, identifier, username=None, password=None):
+    def readFromUrl(self, url, identifier, username=None, password=None, headers=None):
         """
         Reads a WPS DescribeProcess document from a remote service and returns the XML etree object
         url: WPS service base url, to which is appended the HTTP parameters: 'service', 'version', and 'request', and 'identifier'.
@@ -555,7 +555,7 @@ class WPSDescribeProcessReader(WPSReader):
         return self._readFromUrl(url,
                                  {'service': 'WPS', 'request': 'DescribeProcess',
                                      'version': self.version, 'identifier': identifier},
-                                 username=username, password=password)
+                                 username=username, password=password, headers=headers)
 
 
 class WPSExecuteReader(WPSReader):
@@ -895,7 +895,7 @@ class WPSExecution():
             log.info('\nChecking execution status... (location=%s)' %
                      self.statusLocation)
             response = reader.readFromUrl(
-                self.statusLocation, username=self.username, password=self.password)
+                self.statusLocation, username=self.username, password=self.password, headers=self.headers)
         else:
             response = reader.readFromString(response)
 
@@ -959,7 +959,7 @@ class WPSExecution():
             log.info('\nFetching execution results... (location=%s)' %
                      self.resultLocation)
             if self.resultLocation:
-                response = reader.readFromUrl(self.resultLocation, username=self.username, password=self.password)
+                response = reader.readFromUrl(self.resultLocation, username=self.username, password=self.password, headers=self.headers)
             else:
                 log.debug('resultLocation is None')
 
