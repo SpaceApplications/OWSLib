@@ -66,12 +66,15 @@ class ServiceIdentification(object):
         self.type = util.testXMLValue(val)
         self.service=self.type #alternative? keep both?discuss
 
-        val = self._root.find(util.nspath('ServiceTypeVersion', namespace))
-        self.version = util.testXMLValue(val)
+        self.version = '0'
+        # Keep only the "highest" version string
+        for f in self._root.findall(util.nspath('ServiceTypeVersion', namespace)):
+            if f.text is not None and f.text > self.version:
+                self.version = f.text
 
         self.profiles = []
-        for p in self._root.findall(util.nspath('Profile', namespace)):
-            self.profiles.append(util.testXMLValue(val))
+        for profile in self._root.findall(util.nspath('Profile', namespace)):
+            self.profiles.append(util.testXMLValue(profile))
 
 class ServiceProvider(object):
     """Initialize an OWS Common ServiceProvider construct"""

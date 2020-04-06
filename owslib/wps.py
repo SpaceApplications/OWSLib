@@ -16,11 +16,12 @@ Disclaimer
 PLEASE NOTE: the owslib wps module should be considered in beta state: it has been tested versus only a handful of WPS services (deployed by the USGS, BADC and PML).
 More extensive testing is needed and feedback is appreciated.
 
+PLEASE NOTE FURTHER: since the addition of preliminary support for WPS 2.0.0, things may have changed (read: is not working as before) for WPS 1.0.0.
 
 Usage
 -----
 
-The module can be used to execute three types of requests versus a remote WPS endpoint:
+The module can be used to execute three types of requests versus a remote WPS 1.0.0 endpoint:
 
 a) "GetCapabilities"
     - use the method wps.getcapabilities(xml=None)
@@ -49,10 +50,44 @@ c) "Execute"
                   - "GMLMultiPolygonFeatureCollection" can be used to define one or more polygons of (latitude, longitude) points.
           - "output" is an optional output identifier to be included in the ResponseForm section of the request.
 
-    - the optional keyword argument "response" mey be used to avoid submitting a real live request, and instead reading the WPS execution response document
+    - the optional keyword argument "response" may be used to avoid submitting a real live request, and instead reading the WPS execution response document
       from a cached XML file (for debugging or testing purposes)
+
     - the convenience module function monitorExecution() can be used to periodically check the status of a remote running job, and eventually download the output
       either to a named file, or to a file specified by the server.
+
+Preliminary support for the following request has been added according to the WPS 2.0.0 specification:
+
+d) "GetStatus"
+    - use the method execution.checkStatus(url, response, sleepSecs),
+      which submits a GetStatus request to the remote WPS 2.0.0 server and updates the execution object with up-to-date status, percent complete, etc.
+      This is also invoked internally by the monitorExecution() module function.
+
+    - the optional keyword argument "url" may be used to provide a custom status URL.
+      If not provided, the 'statusLocation' URL retrieved from a previous WPS Execute response document (WPS 1.0.0), or a generated 'GetStatus' request URL
+      (WPS 2.0.0), will be used.
+
+    - the optional keyword argument "response" may be used to avoid submitting a real live request, and instead reading the WPS status response document
+      from a cached XML file (for debugging or testing purposes)
+
+    - the optional keyword argument "sleepSecs" provides the number of seconds to sleep before returning control to the caller.
+
+e) "GetResult"
+    - use the method execution.getResult(url, response),
+      which submits a GetResult request to the remote WPS 2.0.0 server and updates the execution object with up-to-date status,
+      and execution results (output values).
+      This is also invoked internally by the monitorExecution() module function as soon as the execution is successful.
+
+    - the optional keyword argument "url" may be used to provide a custom status URL.
+      If not provided, the 'resultLocation' URL retrieved from a previous WPS Execute response document (WPS 1.0.0), or a generated 'GetResult' request URL
+      (WPS 2.0.0), will be used.
+
+    - the optional keyword argument "response" may be used to avoid submitting a real live request, and instead reading the WPS result response document
+      from a cached XML file (for debugging or testing purposes)
+
+The following WPS 2.0.0 operation is not yet implemented:
+
+f) "Dismiss"
 
 
 Examples
@@ -112,7 +147,8 @@ DRAW_NAMESPACE = n.get_namespace("draw")
 GML_SCHEMA_LOCATION = "http://schemas.opengis.net/gml/3.1.1/base/feature.xsd"
 DRAW_SCHEMA_LOCATION = 'http://cida.usgs.gov/climate/derivative/xsd/draw.xsd'
 WFS_SCHEMA_LOCATION = 'http://schemas.opengis.net/wfs/1.1.0/wfs.xsd'
-WPS_DEFAULT_SCHEMA_LOCATION = 'http://schemas.opengis.net/wps/1.0.0/wpsExecute_request.xsd'
+WPS_DEFAULT_SCHEMA_LOCATION_WPS100 = 'http://schemas.opengis.net/wps/1.0.0/wpsExecute_request.xsd'
+WPS_DEFAULT_SCHEMA_LOCATION_WPS200 = 'http://schemas.opengis.net/wps/2.0/wps.xsd'
 WPS_DEFAULT_VERSION = '1.0.0'
 
 
@@ -155,14 +191,21 @@ def is_complexdata(val):
     """
     Checks if the provided value is an implementation of IComplexData.
     """
-    return hasattr(val, 'getXml')
+    return hasattr(val, 'is_complexdata') and val.is_complexdata and hasattr(val, 'getXml')
+
+
+class ILiteralDataInput(object):
+    """
+    Abstract interface representing a literal input object for a WPS request.
+    """
+    is_complexdata = False
 
 
 class IComplexDataInput(object):
-
     """
-    Abstract interface representing complex input object for a WPS request.
+    Abstract interface representing a complex input object for a WPS request.
     """
+    is_complexdata = True
 
     def getXml(self):
         """
@@ -191,7 +234,7 @@ class WebProcessingService(object):
         self.url = url
         self.username = username
         self.password = password
-        self.version = version
+        self._setversion(version)
         self.verbose = verbose
         self.auth_token = auth_token
         self.headers = headers
@@ -207,6 +250,22 @@ class WebProcessingService(object):
         if not skip_caps:
             self.getcapabilities()
 
+        print ("WPS version: %s (Verbose: %s)" % (self.version, self.verbose))
+
+
+    def _setversion(self, version):
+        """
+        Set the WPS service version and adapt the namespaces accordingly
+        """
+        self.version = version
+        if self.version == "1.0.0":
+            namespaces['wps'] = n.get_namespace('wps')
+            namespaces['ows'] = DEFAULT_OWS_NAMESPACE  #n.get_namespace('ows')
+        else:
+            namespaces['wps'] = n.get_namespace('wps200')
+            namespaces['ows'] = n.get_namespace('ows200')
+
+
     def getcapabilities(self, xml=None):
         """
         Method that requests a capabilities document from the remote WPS server and populates this object's metadata.
@@ -221,12 +280,14 @@ class WebProcessingService(object):
             self._capabilities = reader.readFromString(xml)
         else:
             self._capabilities = reader.readFromUrl(
-                self.url, username=self.username, password=self.password)
+                self.url, username=self.username, password=self.password, headers=self.headers)
 
         log.debug(element_to_string(self._capabilities))
 
         # populate the capabilities metadata obects from the XML tree
         self._parseCapabilitiesMetadata(self._capabilities)
+        # good opportunity to initialize the service type version
+        self._setversion(self.identification.version)
 
     def describeprocess(self, identifier, xml=None):
         """
@@ -242,14 +303,14 @@ class WebProcessingService(object):
             rootElement = reader.readFromString(xml)
         else:
             # read from server
-            rootElement = reader.readFromUrl(self.url, identifier)
+            rootElement = reader.readFromUrl(self.url, identifier, headers=self.headers)
 
         log.info(element_to_string(rootElement))
 
         # build metadata objects
         return self._parseProcessMetadata(rootElement)
 
-    def execute(self, identifier, inputs, output=None, request=None, response=None):
+    def execute(self, identifier, inputs, output=None, mode='sync', request=None, response=None):
         """
         Submits a WPS process execution request.
         Returns a WPSExecution object, which can be used to monitor the status of the job, and ultimately retrieve the result.
@@ -257,21 +318,31 @@ class WebProcessingService(object):
         identifier: the requested process identifier
         inputs: list of process inputs as (key, value) tuples (where value is either a string for LiteralData, or an object for ComplexData)
         output: optional identifier for process output reference (if not provided, output will be embedded in the response)
+        mode: optional identifier for execution mode: synchronous ("sync", default) or asynchronous ("async").
         request: optional pre-built XML request document, prevents building of request from other arguments
         response: optional pre-built XML response document, prevents submission of request to live WPS server
         """
 
-        if self.headers is None and self.auth_token is not None:
-            self.headers = {'Access_token': self.auth_token, 'Authorization': self.auth_token}
+        if self.headers is None:
+            self.headers = {}
+        if self.auth_token:
+            self.headers['Access_token'] = self.auth_token
+            self.headers['Authorization'] = self.auth_token
+        self.headers['Content-Type'] = 'application/xml'
 
         # instantiate a WPSExecution object
         log.info('Executing WPS request...')
-        execution = WPSExecution(version=self.version, url=self.url,
+
+        #print ("##### execute: version=%s, identifier=%s, inputs=%s, output=%s, url=%s" % \
+        #        (self.version, identifier, inputs, output, self.url))
+        execution = WPSExecution(version=self.version, url=self.url, mode=mode,
                                  username=self.username, password=self.password, verbose=self.verbose, headers=self.headers)
 
         # build XML request from parameters
         if request is None:
             requestElement = execution.buildRequest(identifier, inputs, output)
+            if self.verbose:
+                print ("requestElement: %s" % element_to_string(requestElement))
             request = etree.tostring(requestElement)
             execution.request = request
         log.debug(request)
@@ -279,7 +350,12 @@ class WebProcessingService(object):
         # submit the request to the live server
         if response is None:
             response = execution.submitRequest(request)
+            if self.verbose:
+                print ('Execute response: %s' % response)
+            print ("responseElement: %s" % element_to_string(response))
+
         else:
+            # A response XML document has been provided by the caller => Skipping the execute request
             response = etree.fromstring(response)
 
         log.debug(etree.tostring(response))
@@ -294,7 +370,13 @@ class WebProcessingService(object):
         Method to parse a <ProcessDescriptions> XML element and returned the constructed Process object
         """
 
-        processDescriptionElement = rootElement.find('ProcessDescription')
+        if self.version.startswith('1.0'):
+            processDescriptionElement = rootElement.find('ProcessDescription')
+        else:
+            # WPS 2.0.0
+            wpsns = getNamespace(rootElement)
+            processDescriptionElement = rootElement.find(nspath('ProcessOffering', ns=wpsns))
+
         process = Process(processDescriptionElement, verbose=self.verbose)
 
         # override existing processes in object metadata, if existing already
@@ -351,6 +433,7 @@ class WebProcessingService(object):
                     if self.verbose == True:
                         dump(self.operations[-1])
 
+            # WPS 1.0.0 -------------------------------------
             # <wps:ProcessOfferings>
             #   <wps:Process ns0:processVersion="1.0.0">
             #     <ows:Identifier xmlns:ows="http://www.opengis.net/ows/1.1">gov.usgs.cida.gdp.wps.algorithm.filemanagement.ReceiveFiles</ows:Identifier>
@@ -360,6 +443,21 @@ class WebProcessingService(object):
             # </wps:ProcessOfferings>
             elif element.tag.endswith('ProcessOfferings'):
                 for child in element.findall(nspath('Process', ns=ns)):
+                    p = Process(child, verbose=self.verbose)
+                    self.processes.append(p)
+                    if self.verbose == True:
+                        dump(self.processes[-1])
+
+            # WPS 2.0.0 -------------------------------------
+            # <wps:Contents>
+            #   <wps:ProcessSummary jobControlOptions="sync-execute async-execute dismiss">
+            #     <ows:Title>Euclidean Distance</ows:Title>
+            #     <ows:Identifier>http://my.site/distance-transform/euclidean-distance</ows:Identifier>
+            #   </wps:ProcessSummary>
+            #   ......
+            # </wps:Contents>
+            elif element.tag.endswith('Contents'):
+                for child in element.findall(nspath('ProcessSummary', ns=ns)):
                     p = Process(child, verbose=self.verbose)
                     self.processes.append(p)
                     if self.verbose == True:
@@ -383,6 +481,8 @@ class WPSReader(object):
         data: GET: dictionary of HTTP (key, value) parameter pairs, POST: XML document to post
         username, password: optional user credentials
         """
+
+        #print ("WPSReader._readFromUrl: url=%s" % url)
 
         if method == 'Get':
             # full HTTP request url
@@ -425,16 +525,15 @@ class WPSCapabilitiesReader(WPSReader):
         super(WPSCapabilitiesReader, self).__init__(
             version=version, verbose=verbose)
 
-    def readFromUrl(self, url, username=None, password=None):
+    def readFromUrl(self, url, username=None, password=None, headers=None):
         """
         Method to get and parse a WPS capabilities document, returning an elementtree instance.
         url: WPS service base url, to which is appended the HTTP parameters: service, version, and request.
         username, password: optional user credentials
         """
         return self._readFromUrl(url,
-                                 {'service': 'WPS', 'request':
-                                     'GetCapabilities', 'version': self.version},
-                                 username=username, password=password)
+                                 {'service': 'WPS', 'request': 'GetCapabilities' },  #, 'version': self.version},
+                                 username=username, password=password, headers=headers)
 
 
 class WPSDescribeProcessReader(WPSReader):
@@ -445,10 +544,9 @@ class WPSDescribeProcessReader(WPSReader):
 
     def __init__(self, version=WPS_DEFAULT_VERSION, verbose=False):
         # superclass initializer
-        super(WPSDescribeProcessReader, self).__init__(
-            version=version, verbose=verbose)
+        super(WPSDescribeProcessReader, self).__init__(version=version, verbose=verbose)
 
-    def readFromUrl(self, url, identifier, username=None, password=None):
+    def readFromUrl(self, url, identifier, username=None, password=None, headers=None):
         """
         Reads a WPS DescribeProcess document from a remote service and returns the XML etree object
         url: WPS service base url, to which is appended the HTTP parameters: 'service', 'version', and 'request', and 'identifier'.
@@ -457,7 +555,7 @@ class WPSDescribeProcessReader(WPSReader):
         return self._readFromUrl(url,
                                  {'service': 'WPS', 'request': 'DescribeProcess',
                                      'version': self.version, 'identifier': identifier},
-                                 username=username, password=password)
+                                 username=username, password=password, headers=headers)
 
 
 class WPSExecuteReader(WPSReader):
@@ -485,11 +583,12 @@ class WPSExecution():
     Class that represents a single WPS process executed on a remote WPS service.
     """
 
-    def __init__(self, version=WPS_DEFAULT_VERSION, url=None, username=None, password=None, verbose=False, headers=None):
+    def __init__(self, version=WPS_DEFAULT_VERSION, url=None, mode='sync', username=None, password=None, verbose=False, headers=None):
 
         # initialize fields
         self.url = url
         self.version = version
+        self.mode = mode
         self.username = username
         self.password = password
         self.verbose = verbose
@@ -511,15 +610,23 @@ class WPSExecution():
         self.statusLocation = None
         self.dataInputs = []
         self.processOutputs = []
+        # WPS 2.0.0
+        self.jobId = None
+        self.expirationDate = None
+        self.nextPoll = None
+        self.resultLocation = None
 
     def buildRequest(self, identifier, inputs=[], output=None):
         """
-        Method to build a WPS process request.
+        Method to build a WPS process execute request.
         identifier: the requested process identifier
         inputs: array of input arguments for the process.
-            - LiteralData inputs are expressed as simple (key,value) tuples where key is the input identifier, value is the value
-            - ComplexData inputs are expressed as (key, object) tuples, where key is the input identifier,
+            - LiteralData inputs are expressed as simple (key, value) tuples where key is the input identifier, value is the value
+              WPS 2.0.0: The value is a LiteralDataInput instance that provides the mimeType, encoding and schema in additional to the value
+            - ComplexData inputs are expressed as (key, object) tuples where key is the input identifier
               and the object must contain a 'getXml()' method that returns an XML infoset to be included in the WPS request
+            - BoundingBoxData inputs are expressed as (key, object) tuples where key is the input identifier
+              and the object is an instance of the BoundingBoxInput class
         output: optional identifier if process output is to be returned as a hyperlink reference
         """
 
@@ -531,11 +638,36 @@ class WPSExecution():
         #             version="1.0.0"
         # xsi:schemaLocation="http://www.opengis.net/wps/1.0.0
         # http://schemas.opengis.net/wps/1.0.0/wpsExecute_request.xsd">
-        root = etree.Element(nspath_eval('wps:Execute', namespaces))
-        root.set('service', 'WPS')
-        root.set('version', WPS_DEFAULT_VERSION)
+
+        # WPS 2.0.0
+        # <wps:Execute xmlns:wps="http://www.opengis.net/wps/2.0"
+	    #              xmlns:ows="http://www.opengis.net/ows/2.0"
+        #              xmlns:xlink="http://www.w3.org/1999/xlink"
+	    #              xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        #              service="WPS"
+        #              version="2.0.0"
+        #              response="document"
+        #              mode="sync">
+	    # xsi:schemaLocation="http://www.opengis.net/wps/2.0
+        # http://schemas.opengis.net/wps/2.0/wps.xsd">
+
+        if self.version == '1.0.0':
+            wps_default_schema_location = WPS_DEFAULT_SCHEMA_LOCATION_WPS100
+            #print('###### OUTPUT: %s' % output)
+            self.mode = 'sync' if not output else 'async'
+        else:
+            wps_default_schema_location = WPS_DEFAULT_SCHEMA_LOCATION_WPS200
+
+        attrs = {
+            'service': 'WPS',
+            'version': self.version,
+            'mode': self.mode,
+            'response':  'document'  # or 'reference' TODO: Depends on what? Check the IS
+        }
+        root = etree.Element(nspath_eval('wps:Execute', namespaces), attrib=attrs)
+        
         root.set(nspath_eval('xsi:schemaLocation', namespaces), '%s %s' %
-                 (namespaces['wps'], WPS_DEFAULT_SCHEMA_LOCATION))
+                 (namespaces['wps'], wps_default_schema_location))
 
         # <ows:Identifier>gov.usgs.cida.gdp.wps.algorithm.FeatureWeightedGridStatisticsAlgorithm</ows:Identifier>
         identifierElement = etree.SubElement(
@@ -543,16 +675,24 @@ class WPSExecution():
         identifierElement.text = identifier
 
         # <wps:DataInputs>
-        dataInputsElement = etree.SubElement(
-            root, nspath_eval('wps:DataInputs', namespaces))
+        if self.version == "1.0.0":
+            dataInputsElement = etree.SubElement(
+                root, nspath_eval('wps:DataInputs', namespaces))
+        else:
+            # WPS 2.0.0: <wps:Input> and <wps:Output> elements are located in the root element.
+            dataInputsElement = root
 
         for (key, val) in inputs:
 
             inputElement = etree.SubElement(
                 dataInputsElement, nspath_eval('wps:Input', namespaces))
-            identifierElement = etree.SubElement(
-                inputElement, nspath_eval('ows:Identifier', namespaces))
-            identifierElement.text = key
+            if self.version == "1.0.0":
+                identifierElement = etree.SubElement(
+                    inputElement, nspath_eval('ows:Identifier', namespaces))
+                identifierElement.text = key
+            else:
+                # WPS 2.0.0: The input identifier is an attribute of the wps:Input element
+                inputElement.set("id", key)
 
             # Literal data
             # <wps:Input>
@@ -561,13 +701,53 @@ class WPSExecution():
             #     <wps:LiteralData>dods://igsarm-cida-thredds1.er.usgs.gov:8080/thredds/dodsC/dcp/conus_grid.w_meta.ncml</wps:LiteralData>
             #   </wps:Data>
             # </wps:Input>
+
+            # WPS 2.0.0
+            # <wps:Input id="processIdentifier">
+            #   <wps:Data mimeType="text/plain">DetectBurnedAreas</wps:Data>
+            # </wps:Input>
+
+            # <wps:Input id="DISTANCE">
+            #   <wps:Data>10</wps:Data>
+            # </wps:Input>
+
             if is_literaldata(val):
                 log.debug("literaldata %s", key)
                 dataElement = etree.SubElement(
                     inputElement, nspath_eval('wps:Data', namespaces))
-                literalDataElement = etree.SubElement(
-                    dataElement, nspath_eval('wps:LiteralData', namespaces))
+                if self.version == "1.0.0":
+                    literalDataElement = etree.SubElement(
+                        dataElement, nspath_eval('wps:LiteralData', namespaces))
+                else:
+                    literalDataElement = dataElement
                 literalDataElement.text = val
+
+            elif isinstance(val, LiteralDataInput):
+                log.debug("literaldata object %s", key)
+                dataElement = etree.SubElement(
+                    inputElement, nspath_eval('wps:Data', namespaces))
+                # TODO: Check if the mimetype attribute may also be included in WPS 1.0.0
+                if val.mimeType:
+                    dataElement.set('mimeType', val.mimeType)
+                if val.encoding:
+                    dataElement.set('encoding', val.encoding)
+                if val.schema:
+                    dataElement.set('schema', val.schema)
+                
+                if self.version == "1.0.0":
+                    literalDataElement = etree.SubElement(
+                        dataElement, nspath_eval('wps:LiteralData', namespaces))
+                else:
+                    # TODO: WPS 2.0.0 is ambiguous as it contains an example execute request with this <wps:LiteralValue> element
+                    #literalDataElement = etree.SubElement(
+                    #    dataElement, nspath_eval('wps:LiteralValue', namespaces))
+                    literalDataElement = dataElement
+                literalDataElement.text = val.value
+
+            # WPS 2.0.0
+            elif isinstance(val, BoundingBoxInput):
+                log.debug("boundingboxdata object %s", key)
+                inputElement.append(val.getXml())
 
             # Complex data
             # <wps:Input>
@@ -591,7 +771,7 @@ class WPSExecution():
                 inputElement.append(val.getXml())
             else:
                 raise Exception(
-                    'input type of "%s" parameter is unknown' % key)
+                    'input type of "%s" parameter is unknown: %s' % (key, val))
 
         # <wps:ResponseForm>
         #   <wps:ResponseDocument storeExecuteResponse="true" status="true">
@@ -600,29 +780,97 @@ class WPSExecution():
         #     </wps:Output>
         #   </wps:ResponseDocument>
         # </wps:ResponseForm>
-        if output is not None:
+        if output and self.version == "1.0.0":
             responseFormElement = etree.SubElement(
                 root, nspath_eval('wps:ResponseForm', namespaces))
-            responseDocumentElement = etree.SubElement(
-                responseFormElement, nspath_eval(
-                    'wps:ResponseDocument', namespaces),
+            responseDocumentElement = etree.SubElement(responseFormElement,
+                                                       nspath_eval('wps:ResponseDocument', namespaces),
                                                        attrib={'storeExecuteResponse': 'true', 'status': 'true'})
             if isinstance(output, str):
                 self._add_output(
                     responseDocumentElement, output, asReference=True)
             elif isinstance(output, list):
-                for (identifier, as_reference) in output:
-                    self._add_output(
-                        responseDocumentElement, identifier, asReference=as_reference)
+                if len(output) > 0 and isinstance(output[0], Output):
+                    for out in output:
+                        self._add_output(
+                            responseDocumentElement, out.identifier, asReference=False)
+                else:
+                    for (identifier, as_reference) in output:
+                        self._add_output(
+                            responseDocumentElement, identifier, asReference=as_reference)
             else:
                 raise Exception(
                     'output parameter is neither string nor list. output=%s' % output)
+
+        # WPS 2.0.0
+        # Generate a WPS 2.0.0 <wps:Output> in the execute request
+        # <wps:Output id="deployResult" transmission="value" mimeType="text/xml"
+        #     schema="https://raw.githubusercontent.com/bpross-52n/common-xml/project/eoep/52n-ogc-schema/src/main/resources/META-INF/xml/wps/2.0/wpsDeployResult.xsd"/>
+        
+        #attrs = {
+        #    'id': 'deployResult', 'transmission': 'value', 'mimeType': 'text/xml',
+        #    'schema': 'https://raw.githubusercontent.com/bpross-52n/common-xml/project/eoep/52n-ogc-schema/src/main/resources/META-INF/xml/wps/2.0/wpsDeployResult.xsd'
+        #}
+        #outputElement = etree.SubElement(root, nspath_eval('wps:Output', namespaces), attrib=attrs)
+
+        if self.version == "2.0.0":
+            if output:
+                outputs = output
+            else:
+                outputs = self.processOutputs
+            for output in outputs:
+                #dump(output, prefix="\tOUTPUT: ")
+                log.debug("Output: %s", output)
+                if isinstance(output, Output):
+                    default_format = output.defaultValue
+                    #dump(default_format, prefix="\tOUTPUT DEFAULT FORMAT: ")
+                    if default_format:
+                        attrs = {
+                            'id': output.identifier,
+                            'transmission': 'reference'
+                        }
+                        if default_format.transmission:
+                            attrs['transmission'] = default_format.transmission
+                        if default_format.encoding:
+                            attrs['encoding'] = default_format.encoding
+                        if default_format.schema:
+                            attrs['schema'] = default_format.schema
+                        if default_format.mimeType:
+                            attrs['mimeType'] = default_format.mimeType
+                    else:
+                        attrs = {
+                            'id': output.identifier,
+                        }
+                    outputElement = etree.SubElement(root, nspath_eval('wps:Output', namespaces), attrib=attrs)
+                elif isinstance(output, str):
+                    attrs = {
+                        'id': output,
+                        'transmission': 'reference'
+                    }
+                    outputElement = etree.SubElement(root, nspath_eval('wps:Output', namespaces), attrib=attrs)
+                elif isinstance(output, tuple):
+                    (identifier, as_reference) = output
+                    attrs = {
+                        'id': identifier,
+                        'transmission': 'reference' if as_reference else 'value'
+                    }
+                    outputElement = etree.SubElement(root, nspath_eval('wps:Output', namespaces), attrib=attrs)
+                elif isinstance(output, list):
+                    for (identifier, as_reference, mime_type) in output:
+                        attrs = {
+                            'id': identifier,
+                            'transmission': 'reference',
+                            'mimeType': mime_type
+                        }
+                        outputElement = etree.SubElement(root, nspath_eval('wps:Output', namespaces), attrib=attrs)
+                else:
+                    raise Exception('output parameter is neither string, tuple or list. output=%s' % output)
+
         return root
 
     def _add_output(self, element, identifier, asReference=False):
-        outputElement = etree.SubElement(
-            element, nspath_eval('wps:Output', namespaces),
-                                                       attrib={'asReference': str(asReference).lower()})
+        outputElement = etree.SubElement(element, nspath_eval('wps:Output', namespaces),
+                                         attrib={'asReference': str(asReference).lower()})
         outputIdentifierElement = etree.SubElement(
             outputElement, nspath_eval('ows:Identifier', namespaces)).text = identifier
 
@@ -630,11 +878,13 @@ class WPSExecution():
     def checkStatus(self, url=None, response=None, sleepSecs=60):
         """
         Method to check the status of a job execution.
-        In the process, this method will upadte the object 'response' attribute.
+        In the process, this method will update the object 'response' attribute.
 
-        url: optional 'statusLocation' URL retrieved from a previous WPS Execute response document.
+        url: optional 'statusLocation' URL retrieved from a previous WPS Execute response document (WPS 1.0.0),
+             or generated 'GetStatus' request URL (WPS 2.0.0).
              If not provided, the current 'statusLocation' URL will be used.
-        sleepSecs: number of seconds to sleep before returning control to the caller.
+        response: optional pre-built XML response document, prevents submission of request to live WPS server
+        sleepSecs: optional number of seconds to sleep before returning control to the caller (default: 60 seconds).
         """
 
         reader = WPSExecuteReader(verbose=self.verbose)
@@ -645,7 +895,7 @@ class WPSExecution():
             log.info('\nChecking execution status... (location=%s)' %
                      self.statusLocation)
             response = reader.readFromUrl(
-                self.statusLocation, username=self.username, password=self.password)
+                self.statusLocation, username=self.username, password=self.password, headers=self.headers)
         else:
             response = reader.readFromString(response)
 
@@ -666,7 +916,7 @@ class WPSExecution():
     def isComplete(self):
         if (self.status == 'ProcessSucceeded' or self.status == 'ProcessFailed' or self.status == 'Exception'):
             return True
-        elif (self.status == 'ProcessStarted'):
+        elif (self.status == 'ProcessStarted' or self.status == 'ProcessRunning'):  # WPS 2.0.0: New "Running" status
             return False
         elif (self.status == 'ProcessAccepted' or self.status == 'ProcessPaused'):
             return False
@@ -674,6 +924,9 @@ class WPSExecution():
             raise Exception(
                 'Unknown process execution status: %s' % self.status)
 
+    def isSucceeded(self):
+        return self.isSucceded()
+    
     def isSucceded(self):
         if self.status == 'ProcessSucceeded':
             return True
@@ -682,6 +935,41 @@ class WPSExecution():
 
     def isNotComplete(self):
         return not self.isComplete()
+
+    def getResult(self, url=None, response=None):
+        """
+        Method to retrieve the results of a job execution.
+        In the process, this method will update the object 'response' attribute.
+
+        url: optional 'statusLocation' URL retrieved from a previous WPS Execute response document (WPS 1.0.0),
+             or generated 'GetResult' request URL (WPS 2.0.0).
+             If not provided, the current 'statusLocation' URL will be used.
+        response: optional pre-built XML response document, prevents submission of request to live WPS server.
+        """
+
+        reader = WPSExecuteReader(verbose=self.verbose)
+
+        if response is not None:
+            # A response string was provided as parameter
+            response = reader.readFromString(response)
+        else:
+            # override status location
+            if url is not None:
+                self.resultLocation = url
+            log.info('\nFetching execution results... (location=%s)' %
+                     self.resultLocation)
+            if self.resultLocation:
+                response = reader.readFromUrl(self.resultLocation, username=self.username, password=self.password, headers=self.headers)
+            else:
+                log.debug('resultLocation is None')
+
+        if response is not None:
+            # store latest response
+            self.response = etree.tostring(response)
+            #print("#### Response: %s" % self.response)
+            log.debug(self.response)
+            #print ("#### getResult(), request=%s, response=%s" % (self.resultLocation, self.response))
+            self.parseResponse(response)
 
     def getOutput(self, filepath=None):
         """
@@ -752,20 +1040,42 @@ class WPSExecution():
 
     def parseResponse(self, response):
         """
-        Method to parse a WPS response document
+        Method to parse a WPS execute response document
         """
-
         rootTag = response.tag.split('}')[1]
+
+        # WPS 2.0.0: <wps:Result>
+        # Synchronous call response. See example in _parseExecuteResult(), below.
+        if rootTag == 'Result':
+            self._parseExecuteResult(response)
+
+        # WPS 2.0.0: <wps:StatusInfo>
+        # Asynchronous call response. See example in _parseStatusInfo(), below.
+        elif rootTag == 'StatusInfo':
+            self._parseStatusInfo(response)
+            if 'Failed' in self.status:
+                self.getResult()
+
         # <ns0:ExecuteResponse>
-        if rootTag == 'ExecuteResponse':
+        elif rootTag == 'ExecuteResponse':
             self._parseExecuteResponse(response)
 
         # <ows:ExceptionReport>
         elif rootTag == 'ExceptionReport':
+            if self.verbose:
+                print ('ExceptionReport: %s' % element_to_string(response))
             self._parseExceptionReport(response)
+            self.status = 'ProcessFailed'
 
         else:
             log.debug('Unknown Response')
+
+        if self.verbose:
+            print('Status=%s, Percent completed=%s, Message=%s' % (self.status, self.percentCompleted, self.statusMessage))
+            print('Job ID=%s, Expiration date=%s, Next poll=%s' % (self.jobId, self.expirationDate, self.nextPoll))
+            print('Status location=%s, Result location=%s' % (self.statusLocation, self.resultLocation))
+            for error in self.errors:
+                print ('   Error code=%s, locator=%s, text=%s' % (error.code, error.locator, error.text))
 
         # log status, errors
         log.info('Execution status=%s' % self.status)
@@ -843,18 +1153,152 @@ class WPSExecution():
             if self.verbose == True:
                 dump(self.processOutputs[-1])
 
+    def _parseStatusInfo(self, root):
+        """
+        Method to parse a WPS 2.0.0 Execute StatusInfo response document and populate this object's metadata.
+        """
+        # <wps:StatusInfo xmlns:ows="http://www.opengis.net/ows/2.0"
+        #       xmlns:wps="http://www.opengis.net/wps/2.0.0"
+        #       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        #       xsi:schemaLocation="http://www.opengis.net/wps/2.0.0/wpsStatusInfo.xsd">
+        #   <wps:JobID>FB6DD4B0-A2BB-11E3-A5E2-0800200C9A66</wps:JobID>
+        #   <wps:Status>Accepted</wps:Status>
+        #   <wps:NextPoll>2014-12-24T16:00:00Z</wps:NextPoll>
+        # </wps:StatusInfo>
+        wpsns = getNamespace(root)
 
-class ComplexData(object):
+        self.jobId = root.find(nspath('JobID', ns=wpsns)).text
+        self.status = 'Process%s' % root.find(nspath('Status', ns=wpsns)).text
+
+        # Status Location: All four parameters are mandatory.
+        # Example URL+KVP:
+        # http://hostname:port/path?service=WPS&version=2.0.0&request=GetStatus&jobid=FB6DD4B0-A2BB-11E3-A5E2-0800200C9A66
+        self.statusLocation = build_get_url(self.url,
+                                            {'service': 'WPS', 'request': 'GetStatus',
+                                             'version': self.version, 'jobid': self.jobId})
+
+        # All four parameters are mandatory
+        # http://hostname:port/path?service=WPS&version=2.0.0&request=GetResult&jobid=FB6DD4B0-A2BB-11E3-A5E2-0800200C9A66
+        self.resultLocation = build_get_url(self.url,
+                                            {'service': 'WPS', 'request': 'GetResult',
+                                             'version': self.version, 'jobid': self.jobId})
+        
+        # (Optional) Date and time by which the job and its results will be no longer accessible.
+        try:
+            expirationDate = root.find(nspath('ExpirationDate', ns=wpsns)).text
+            self.expirationDate = expirationDate
+        except:
+            pass
+        # (Optional) Date and time for the next suggested status polling.
+        try:
+            nextPoll = root.find(nspath('NextPoll', ns=wpsns)).text
+            self.nextPoll = nextPoll
+        except:
+            pass
+        # (Optional) Estimated date and time by which the processing job will be finished.
+        try:
+            estimatedCompletion = root.find(nspath('EstimatedCompletion', ns=wpsns)).text
+            self.estimatedCompletion = estimatedCompletion
+        except:
+            pass
+        # (Optional) Percentage of process that has been completed.
+        try:
+            percentCompleted = int(root.find(nspath('PercentCompleted', ns=wpsns)).text)
+            self.percentCompleted = percentCompleted
+        except:
+            pass
+
+
+    def _parseExecuteResult(self, root):
+        """
+        Method to parse a WPS 2.0.0 Execute Result response document and populate this object's metadata.
+        """
+        # WPS 2.0.0
+        # - JobID is only mandatory if the execution is asynchronous. Optional otherwise.
+        # - ExpirationDate is present if the server will delete the stored results at some point in time.
+        # - Output: one or more (mandatory).
+        # <wps:Result
+        #       xmlns:ows="http://www.opengis.net/ows/2.0"
+        #       xmlns:wps="http://www.opengis.net/wps/2.0.0"
+        #       xmlns:xlink="http://www.w3.org/1999/xlink"
+        #       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        #       xsi:schemaLocation="http://www.opengis.net/wps/2.0.0/wpsGetResult.xsd ">
+        #   <wps:JobID>FB6DD4B0-A2BB-11E3-A5E2-0800200C9A66</wps:JobID>
+        #   <wps:ExpirationDate>2014-12-24T24:00:00Z</wps:ExpirationDate>
+        #   <wps:Output id="BUFFERED_GEOMETRY">
+        #       <wps:Reference xlink:href="http://result.data.server/FB6DD4B0-A2BB-11E3-A5E2-0800200C9A66/BUFFERED_GEOMETRY.xml"/>
+        #   </wps:Output>
+        # </wps:Result>
+
+        # retrieve WPS namespace directly from root element
+        wpsns = getNamespace(root)
+
+        self.jobId = root.find(nspath('JobID', ns=wpsns)).text
+        # (Optional) Date and time by which the job and its results will be no longer accessible.
+        try:
+            expirationDate = root.find(nspath('ExpirationDate', ns=wpsns)).text
+            self.expirationDate = expirationDate
+        except:
+            pass
+
+        for outputElement in root.findall(nspath('Output', ns=wpsns)):
+            self.processOutputs.append(Output(outputElement))
+            if self.verbose == True:
+                dump(self.processOutputs[-1])
+
+        # A <wps:Result> is only returned after a successful execution.
+        self.status = 'ProcessSucceeded'
+        self.percentCompleted = 100
+
+
+class DataFormat(object):
 
     """
-    Class that represents a ComplexData element in a WPS document
+    Class that represents a input/output literal/complex Format element in a WPS document
     """
+    # data_format = None
+    # mimeType = ''
+    # encoding = ''
+    # schema = ''
+    # maximumMegabytes = 0
+    # transmission = 'value'
+    # version = WPS_DEFAULT_VERSION
 
-    def __init__(self, mimeType=None, encoding=None, schema=None):
-        self.mimeType = mimeType
-        self.encoding = encoding
-        self.schema = schema
+    def __init__(self, data_format=None, mimeType=None, encoding=None, schema=None, \
+                 maximumMegabytes=None,  transmission=None, version=None):
+        self.data_format = data_format
 
+        if data_format is None:
+            self.mimeType = mimeType
+            self.encoding = encoding
+            self.schema = schema
+            self.maximumMegabytes = maximumMegabytes
+            self.transmission = transmission
+            self.version = version
+        else:
+            log.debug("DataFormat: %s, %s, %s, %s, %s, %s, %s", data_format, mimeType, encoding, schema, maximumMegabytes, transmission, version)
+            #dump(self.data_format, prefix='\t\t*** Format before: ')
+            self.mimeType = mimeType if mimeType is not None else data_format.mimeType
+            self.encoding = encoding if encoding is not None else data_format.encoding
+            self.schema = schema if schema is not None else data_format.schema
+            self.maximumMegabytes = maximumMegabytes if maximumMegabytes is not None else data_format.maximumMegabytes
+            self.transmission = transmission if transmission is not None else data_format.transmission
+            self.version = version if version is not None else data_format.version
+
+        if self.mimeType is None:
+            self.mimeType = ''
+        if self.encoding is None:
+            self.encoding = ''
+        if self.schema is None:
+            self.schema = ''
+        if self.maximumMegabytes is None:
+            self.maximumMegabytes = 0
+        if self.transmission is None:
+            self.transmission = 'value'
+        if self.version is None:
+            self.version = WPS_DEFAULT_VERSION
+
+        #dump(self, prefix='\t\t*** Format after: ')
 
 class InputOutput(object):
 
@@ -865,6 +1309,15 @@ class InputOutput(object):
     def __init__(self, element):
 
         self.abstract = None
+        self.identifier = None
+        self.title = None
+        self.abstract = None
+
+        self.wpsns = getNamespace(element)
+        if self.wpsns == n.get_namespace('wps200'):  # 'http://www.opengis.net/wps/2.0.0'
+            self.version = '2.0.0'
+        else:
+            self.version = '1.0.0'
 
         # loop over sub-elements without requiring a specific namespace
         for subElement in element:
@@ -884,8 +1337,11 @@ class InputOutput(object):
         self.allowedValues = []
         self.supportedValues = []
         self.defaultValue = None
+        self.supportedCRS = []
+        self.defaultCRS = None
         self.dataType = None
         self.anyValue = False
+        self.uom = None
 
     def _parseData(self, element):
         """
@@ -923,7 +1379,30 @@ class InputOutput(object):
         #     <ows:AnyValue xmlns:ows="http://www.opengis.net/ows/1.1" />
         # </LiteralData>
 
+        # WPS 2.0.0 - In Process Description
+        # - Element LiteralData is used for both inputs and outputs (no LiteralOutput element anymore).
+        # - Default and Supported formats are included in a flat list (at least one).
+        # - LiteralDataDomain elements are included in a flat list (at least one).
+        # - The default format is identified with the default attribute set to "true".
+        # - The mimeType, encoding and schema values are included as attributes in the Format elements.
+        #   All three are mandatory.
+        # - Optional attribute: maximumMegabytes (positive integer).
+        # <wps:LiteralData>
+        #   <wps:Format mimeType="application/geotiff" encoding="raw" default="true"/>
+        #   <wps:Format mimeType="application/geotiff" encoding="base64"/>
+        #   <LiteralDataDomain default="true">
+        #     ...
+        #   </LiteralDataDomain>
+        # </wps:LiteralData>
+
+        #print ("element: %s, literalElementName: %s" % (element, literalElementName))
+
         literal_data_element = element.find(literalElementName)
+        wpsns = getNamespace(element)
+        if literal_data_element is None:
+            # If not found, search with the WPS namespace
+            literal_data_element = element.find(nspath(literalElementName, ns=wpsns))
+        #print ("literal_data_element: %s" % literal_data_element)
 
         if literal_data_element is not None:
             self.dataType = 'LiteralData'
@@ -947,6 +1426,46 @@ class InputOutput(object):
                             getTypedValue(self.dataType, value.text))
                 elif sub_element.tag.endswith('AnyValue'):
                     self.anyValue = True
+
+                # WPS 2.0.0
+                if sub_element.tag.endswith('Format'):
+                    is_default = bool(sub_element.get('default'))
+                    data_format = DataFormat(
+                        mimeType=sub_element.get('mimeType', ''),
+                        encoding=sub_element.get('encoding', ''),
+                        schema=sub_element.get('schema', ''),
+                        maximumMegabytes=sub_element.get('maximumMegabytes', 0),
+                        version='2.0.0'
+                    )
+                    if is_default:
+                        self.defaultValue = data_format
+                    else:
+                        self.supportedValues.append(data_format)
+                
+                # WPS 2.0.0
+                # <LiteralDataDomain default="true">
+                #   <ows:AllowedValues>
+                #     <ows:Range>
+                #       <ows:MinimumValue>1</ows:MinimumValue>
+                #       <ows:MaximumValue>1000</ows:MaximumValue>
+                #     </ows:Range>
+                #   </ows:AllowedValues>
+                #   <ows:DataType ows:reference="http://www.w3.org/2001/XMLSchema#float">float</ows:DataType>
+                #   <ows:UOM>meters</ows:UOM>
+                #   <ows:DefaultValue>100</ows:DefaultValue>
+                # </LiteralDataDomain>
+                if sub_element.tag.endswith('LiteralDataDomain'):
+                    subns = getNamespace(sub_element)
+                    sub_sub_element = sub_element.find(nspath("DataType", ns=subns))
+                    if sub_sub_element != None:
+                        self.dataType = sub_sub_element.get(nspath("reference", ns=subns))
+                    sub_sub_element = sub_element.find(nspath("UOM", ns=subns))
+                    if sub_sub_element != None:
+                        self.uom = sub_sub_element.text
+                    sub_sub_element = sub_element.find(nspath("DefaultValue", ns=subns))
+                    if sub_sub_element != None:
+                        self.defaultValue = sub_sub_element.text
+
 
     def _parseComplexData(self, element, complexDataElementName):
         """
@@ -983,14 +1502,38 @@ class InputOutput(object):
         #     </SupportedComplexData>
         # </ComplexOutput>
 
+        # WPS 2.0.0
+        # - Element ComplexData is used for both inputs and outputs (no ComplexOutput element anymore).
+        # - Default and Supported formats are included in a flat list.
+        # - The default format is identified with the default attribute set to "true".
+        # - The mimeType, encoding and schema values are included as attributes in the Format elements.
+        #   All three are mandatory.
+        # - Optional attribute: maximumMegabytes (positive integer).
+        # <wps:ComplexData>
+        #   <wps:Format mimeType="application/geotiff" encoding="raw" default="true"/>
+        #   <wps:Format mimeType="application/geotiff" encoding="base64"/>
+        # </wps:ComplexData>
+
+        #print ("element: %s, complexDataElementName: %s" % (element, complexDataElementName))
+
+        wpsns = getNamespace(element)
         complex_data_element = element.find(complexDataElementName)
+        if complex_data_element is None:
+            # If not found, search with the WPS namespace
+            complex_data_element = element.find(nspath(complexDataElementName, ns=wpsns))
+        if complex_data_element is None and complexDataElementName == "ComplexOutput":
+            # If not found, search for "ComplexData" instead of "ComplexOutput"
+            complex_data_element = element.find(nspath("ComplexData", ns=wpsns))
+
+        print ("complex_data_element: %s" % complex_data_element)
+
         if complex_data_element is not None:
             self.dataType = "ComplexData"
 
             for supported_comlexdata_element in\
                     complex_data_element.findall('SupportedComplexData'):
                 self.supportedValues.append(
-                    ComplexData(
+                    DataFormat(
                         mimeType=testXMLValue(
                             supported_comlexdata_element.find('Format')),
                         encoding=testXMLValue(
@@ -1003,7 +1546,7 @@ class InputOutput(object):
             for format_element in\
                     complex_data_element.findall('Supported/Format'):
                 self.supportedValues.append(
-                    ComplexData(
+                    DataFormat(
                         mimeType=testXMLValue(format_element.find('MimeType')),
                         encoding=testXMLValue(format_element.find('Encoding')),
                         schema=testXMLValue(format_element.find('Schema'))
@@ -1012,13 +1555,31 @@ class InputOutput(object):
 
             default_format_element = complex_data_element.find('Default/Format')
             if default_format_element is not None:
-                self.defaultValue = ComplexData(
+                self.defaultValue = DataFormat(
                     mimeType=testXMLValue(
                         default_format_element.find('MimeType')),
                     encoding=testXMLValue(
                         default_format_element.find('Encoding')),
                     schema=testXMLValue(default_format_element.find('Schema'))
                 )
+
+            # WPS 2.0.0
+            for format_element in complex_data_element.findall(nspath('Format', ns=wpsns)):
+                is_default = bool(format_element.get('default'))
+                data_format = DataFormat(
+                    mimeType=format_element.get('mimeType', ''),
+                    encoding=format_element.get('encoding', ''),
+                    schema=format_element.get('schema', ''),
+                    maximumMegabytes=format_element.get('maximumMegabytes', 0),
+                    transmission=format_element.get('transmission', ''),
+                    version='2.0.0'
+                )
+                if is_default:
+                    self.defaultValue = data_format
+                    print(" Input default format: %s, mimetype: %s" % (self.defaultValue, self.defaultValue.mimeType))
+                else:
+                    self.supportedValues.append(data_format)
+
 
     def _parseBoundingBoxData(self, element, bboxElementName):
         """
@@ -1045,7 +1606,20 @@ class InputOutput(object):
         #   </Supported>
         # </BoundingBoxOutput>
 
+        # WPS 2.0.0
+        # <wps:BoundingBoxData>
+        #   <wps:Format mimeType="text/plain" default="true"/>
+        #   <wps:Format mimeType="text/xml"/>
+        #   <wps:SupportedCRS default="true">EPSG:4326</wps:SupportedCRS>
+        #   <wps:SupportedCRS>http://www.opengis.net/def/crs/EPSG/0/4258</wps:SupportedCRS>
+        # </wps:BoundingBoxData>
+
+        wpsns = getNamespace(element)
         bbox_data_element = element.find(bboxElementName)
+        if bbox_data_element is None:
+            # If not found, search with the WPS namespace
+            bbox_data_element = element.find(nspath(bboxElementName, ns=wpsns))
+
         if bbox_data_element is not None:
             self.dataType = 'BoundingBoxData'
 
@@ -1055,6 +1629,30 @@ class InputOutput(object):
             default_bbox_element = bbox_data_element.find('Default/CRS')
             if default_bbox_element is not None:
                 self.defaultValue = default_bbox_element.text
+
+            # WPS 2.0.0
+            for format_element in bbox_data_element.findall(nspath('Format', ns=wpsns)):
+                is_default = bool(format_element.get('default'))
+                data_format = DataFormat(
+                    mimeType=format_element.get('mimeType'),
+                    encoding=format_element.get('encoding'),
+                    schema=format_element.get('schema'),
+                    maximumMegabytes=format_element.get('maximumMegabytes'),
+                    version='2.0.0'
+                )
+                if is_default:
+                    self.defaultValue = data_format
+                else:
+                    self.supportedValues.append(data_format)
+
+            # WPS 2.0.0
+            # Store SupportedCRS in new properties
+            for format_element in bbox_data_element.findall(nspath('SupportedCRS', ns=wpsns)):
+                is_default = bool(format_element.get('default'))
+                if is_default:
+                    self.defaultCRS = format_element.text
+                else:
+                    self.supportedCRS.append(format_element.text)
 
 
 class Input(InputOutput):
@@ -1070,13 +1668,17 @@ class Input(InputOutput):
         # <Input maxOccurs="1" minOccurs="0">
         # OR
         # <MinimumOccurs>1</MinimumOccurs>
-        self.minOccurs = -1
+
+        # WPS 2.0.0
+        # minOccurs and maxOccurs default to 1
+
+        self.minOccurs = 1
         if inputElement.get("minOccurs") is not None:
             self.minOccurs = int(inputElement.get("minOccurs"))
         if inputElement.find('MinimumOccurs') is not None:
             self.minOccurs = int(
                 testXMLValue(inputElement.find('MinimumOccurs')))
-        self.maxOccurs = -1
+        self.maxOccurs = 1
         if inputElement.get("maxOccurs") is not None:
             self.maxOccurs = int(inputElement.get("maxOccurs"))
         if inputElement.find('MaximumOccurs') is not None:
@@ -1101,14 +1703,16 @@ class Output(InputOutput):
 
     def __init__(self, outputElement):
 
-        # superclass initializer
-        super(Output, self).__init__(outputElement)
-
-        self.reference = None
+        self.identifier = None
+        self.reference = ''
         self.mimeType = None
+        self.encoding = None
         self.data = []
         self.fileName = None
         self.filePath = None
+
+        # superclass initializer
+        super(Output, self).__init__(outputElement)
 
         # extract wps namespace from outputElement itself
         wpsns = getNamespace(outputElement)
@@ -1119,16 +1723,33 @@ class Output(InputOutput):
         referenceElement = outputElement.find(nspath('Reference', ns=wpsns))
         if referenceElement is not None:
             self.reference = referenceElement.get('href')
+            if self.reference is None:
+                # WPS 2.0.0 uses 'xlink:href'
+                self.reference = referenceElement.get(nspath('href', ns=namespaces['xlink']))
             self.mimeType = referenceElement.get('mimeType')
 
-        # <LiteralOutput>
-        self._parseLiteralData(outputElement, 'LiteralOutput')
+        # WPS 1.0.0: The identifier is in <ProcessOutputs><Output><ows:Identifier>
+        identifierElement = etree.SubElement(outputElement, nspath_eval('ows:Identifier', namespaces))
+        if identifierElement is not None:
+            pass
+            ############## self.identifier = identifierElement.
 
-        # <ComplexData> or <ComplexOutput>
-        self._parseComplexData(outputElement, 'ComplexOutput')
+        # WPS 2.0.0: In <wps:Result><wps:Output> the identifier is in the "id" attribute
+        if self.identifier == None:
+            self.identifier = outputElement.get('id')
 
-        # <BoundingBoxData>
-        self._parseBoundingBoxData(outputElement, 'BoundingBoxOutput')
+        if wpsns == '':
+            # <LiteralOutput>
+            self._parseLiteralData(outputElement, 'LiteralOutput')
+            # <ComplexData> or <ComplexOutput>
+            self._parseComplexData(outputElement, 'ComplexOutput')
+            # <BoundingBoxData>
+            self._parseBoundingBoxData(outputElement, 'BoundingBoxOutput')
+        else:
+            # WPS 2.0.0 - Outputs in process descriptions
+            self._parseLiteralData(outputElement, 'LiteralData')
+            self._parseComplexData(outputElement, 'ComplexData')
+            self._parseBoundingBoxData(outputElement, 'BoundingBoxData')
 
         # <Data>
         # <ns0:Data>
@@ -1173,10 +1794,18 @@ class Output(InputOutput):
         #   </wps:BoundingBoxData>
         # </wps:Data>
         #
+
+        # WPS 2.0.0 - In <wps:Result> upon successful process execution (in response to GetResult request)
+        # <wps:Output id="output1">
+        #   <wps:Data mimeType="application/xml" encoding="UTF-8">
+        #     <wps:LiteralValue dataType="https://www.w3.org/2001/XMLSchema-datatypes#string">in1</wps:LiteralValue>
+        #   </wps:Data>
+        # </wps:Output>
+
         dataElement = outputElement.find(nspath('Data', ns=wpsns))
         if dataElement is not None:
-            complexDataElement = dataElement.find(
-                nspath('ComplexData', ns=wpsns))
+            # <wps:ComplexData> in WPS 1.0.0
+            complexDataElement = dataElement.find(nspath('ComplexData', ns=wpsns))
             if complexDataElement is not None:
                 self.dataType = "ComplexData"
                 self.mimeType = complexDataElement.get('mimeType')
@@ -1184,14 +1813,37 @@ class Output(InputOutput):
                     self.data.append(complexDataElement.text.strip())
                 for child in complexDataElement:
                     self.data.append(etree.tostring(child))
-            literalDataElement = dataElement.find(
-                nspath('LiteralData', ns=wpsns))
+
+            # <wps:ComplexValue> in WPS 2.0.0
+            complexValueElement = dataElement.find(nspath('ComplexValue', ns=wpsns))
+            # TODO: Test the parsing of ComplexValue in GetResult responses
+            if complexValueElement is not None:
+                self.mimeType = dataElement.get('mimeType', '')
+                self.encoding = dataElement.get('encoding', '')
+                self.dataType = complexValueElement.get('dataType')
+                if complexValueElement.text is not None and complexValueElement.text.strip() is not '':
+                    self.data.append(complexValueElement.text.strip())
+                for child in complexValueElement:
+                    self.data.append(etree.tostring(child))
+
+            # <wps:LiteralData> in WPS 1.0.0
+            literalDataElement = dataElement.find(nspath('LiteralData', ns=wpsns))
             if literalDataElement is not None:
                 self.dataType = literalDataElement.get('dataType')
                 if literalDataElement.text is not None and literalDataElement.text.strip() is not '':
                     self.data.append(literalDataElement.text.strip())
-            bboxDataElement = dataElement.find(
-                nspath('BoundingBoxData', ns=wpsns))
+
+            # <wps:LiteralValue> in WPS 2.0.0
+            literalValueElement = dataElement.find(nspath('LiteralValue', ns=wpsns))
+            if literalValueElement is not None:
+                self.mimeType = dataElement.get('mimeType', '')
+                self.encoding = dataElement.get('encoding', '')
+                self.dataType = literalValueElement.get('dataType')
+                if literalValueElement.text is not None and literalValueElement.text.strip() is not '':
+                    self.data.append(literalValueElement.text.strip())
+
+            # <wps:BoundingBoxData> in WPS 1.0.0
+            bboxDataElement = dataElement.find(nspath('BoundingBoxData', ns=wpsns))
             if bboxDataElement is not None:
                 self.dataType = "BoundingBoxData"
                 bbox = BoundingBox(bboxDataElement)
@@ -1203,6 +1855,14 @@ class Output(InputOutput):
                         bbox_value = "{0},{1},{2},{3}".format(bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
                     log.debug("bbox=%s", bbox_value)
                     self.data.append(bbox_value)
+
+            # <wps:BoundingBoxValue> in WPS 2.0.0
+            bboxValueElement = dataElement.find(nspath('BoundingBoxValue', ns=wpsns))
+            # TODO: Test the parsing of BoundingBoxValue in GetResult responses
+
+        if self.mimeType is None and self.defaultValue is not None:
+            self.mimeType = self.defaultValue.mimeType
+
 
     def retrieveData(self, username=None, password=None):
         """
@@ -1221,8 +1881,7 @@ class Output(InputOutput):
         log.info('Output URL=%s' % url)
         if '?' in url:
             spliturl = url.split('?')
-            u = openURL(spliturl[0], spliturl[
-                        1], method='Get', username=username, password=password)
+            u = openURL(spliturl[0], spliturl[1], method='Get', username=username, password=password)
             # extract output filepath from URL query string
             self.fileName = spliturl[1].split('=')[1]
         else:
@@ -1263,9 +1922,9 @@ class Output(InputOutput):
 
 
 class WPSException:
-
     """
     Class representing an exception raised by a WPS.
+    XML Schema: http://schemas.opengis.net/ows/2.0/owsExceptionReport.xsd
     """
 
     def __init__(self, root):
@@ -1292,16 +1951,48 @@ class Process(object):
         #                          xml:lang="en-US" xmlns:ns0="http://www.opengis.net/wps/1.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
         # OR:
         # <ns0:Process ns0:processVersion="1.0.0">
+        # OR:
+        # <ns0:ProcessOffering ns0:processVersion="1.0.0">
+        #
+        # In WPS 2.0.0:
+        # - the processVersion attribute has moved to the ProcessSummary and the ProcessOffering elements.
+        # - the statusSupported attribute is replaced with jobControlOptions (sync-execute, async-execute, dismiss, ...).
+        # - the storeSupported attributes is replaced with outputTransmission (value, reference).
+        # - the Process element is now a direct child of the new ProcessOffering element
+        # <wps:ProcessSummary jobControlOptions="async-execute dismiss" outputTransmission="value reference" processVersion="1.4.0">
+
         self._root = elem
         self.verbose = verbose
 
         wpsns = getNamespace(elem)
 
-        # <ProcessDescription statusSupported="true" storeSupported="true" ns0:processVersion="1.0.0">
-        self.processVersion = elem.get(nspath('processVersion', ns=wpsns))
+        # WPS 1.0.0
         self.statusSupported = bool(elem.get("statusSupported"))
         self.storeSupported = bool(elem.get("storeSupported"))
-        self.abstract = None
+
+        # <ProcessDescription statusSupported="true" storeSupported="true" ns0:processVersion="1.0.0">
+        self.processVersion = elem.get(nspath('processVersion', ns=wpsns))
+
+        # WPS 2.0.0
+        # <wps:ProcessSummary jobControlOptions="sync-execute async-execute dismiss"
+        #                     outputTransmission="value reference"
+        #                     processVersion="1.4.0">
+        if elem.tag.endswith('ProcessOffering'):
+            self.processVersion = elem.get('processVersion')
+            #print ("processVersion = %s" % self.processVersion)
+            self.jobControlOptions = elem.get("jobControlOptions")
+            #print ("jobControlOptions = %s" % self.jobControlOptions)
+            self.outputTransmission = elem.get("outputTransmission")
+            #print ("outputTransmission = %s" % self.outputTransmission)
+            # WPS 2.0.0 to WPS 1.0.0 mapping
+            self.statusSupported = self.jobControlOptions is not None and "async-execute" in self.jobControlOptions
+            self.storeSupported = self.outputTransmission is not None and "reference" in self.outputTransmission
+
+            self.abstract = None
+            # Move now to its Process child
+            wpsns = getNamespace(self._root)
+            elem = elem.find(nspath('Process', ns=wpsns))
+            self._root = elem
 
         for child in elem:
 
@@ -1323,26 +2014,58 @@ class Process(object):
         if self.verbose == True:
             dump(self)
 
-        # <DataInputs>
+        #print ("process element: %s" % elem)
+
+        # WPS 1.0.0
+        # <DataInputs>{<Input>...</Input>}</DataInputs>
         self.dataInputs = []
         for inputElement in elem.findall('DataInputs/Input'):
             self.dataInputs.append(Input(inputElement))
             if self.verbose == True:
                 dump(self.dataInputs[-1], prefix='\tInput: ')
+                dump(self.dataInputs[-1].defaultValue, prefix='\t\tDefault format: ')
 
-        # <ProcessOutputs>
+        # WPS 2.0.0
+        # {<wps:Input>..</wps:Input>}
+        for inputElement in elem.findall(nspath('Input', ns=wpsns)):
+            #print ("process input element: %s" % inputElement)
+            self.dataInputs.append(Input(inputElement))
+            if self.verbose == True:
+                dump(self.dataInputs[-1], prefix='\tInput: ')
+                dump(self.dataInputs[-1].defaultValue, prefix='\t\tDefault format: ')
+
         self.processOutputs = []
+        # WPS 1.0.0
+        # <ProcessOutputs>{<Output>...</Output>}</ProcessOutputs>
         for outputElement in elem.findall('ProcessOutputs/Output'):
             self.processOutputs.append(Output(outputElement))
             if self.verbose == True:
-                dump(self.processOutputs[-1],  prefix='\tOutput: ')
+                dump(self.processOutputs[-1], prefix='\tOutput: ')
+                dump(self.processOutputs[-1].defaultValue, prefix='\t\tDefault format: ')
+
+        # WPS 2.0.0
+        # {<wps:Output>..</wps:Output>}
+        for outputElement in elem.findall(nspath('Output', ns=wpsns)):
+            #print ("process output element: %s" % outputElement)
+            self.processOutputs.append(Output(outputElement))
+            if self.verbose == True:
+                dump(self.processOutputs[-1], prefix='\tOutput: ')
+                dump(self.processOutputs[-1].defaultValue, prefix='\t\tDefault format: ')
 
 
-class ComplexDataInput(IComplexDataInput, ComplexData):
+class LiteralDataInput(ILiteralDataInput, DataFormat):
 
-    def __init__(self, value, mimeType=None, encoding=None, schema=None):
+    def __init__(self, value, data_format=None, mimeType=None, encoding=None, schema=None, version=None):
+        super(LiteralDataInput, self).__init__(
+            data_format=data_format, mimeType=mimeType, encoding=encoding, schema=schema, version=version)
+        self.value = value
+
+
+class ComplexDataInput(IComplexDataInput, DataFormat):
+
+    def __init__(self, value, data_format=None, mimeType=None, encoding=None, schema=None, version=None):
         super(ComplexDataInput, self).__init__(
-            mimeType=mimeType, encoding=encoding, schema=schema)
+            data_format=data_format, mimeType=mimeType, encoding=encoding, schema=schema, version=version)
         self.value = value
 
     def getXml(self):
@@ -1357,6 +2080,12 @@ class ComplexDataInput(IComplexDataInput, ComplexData):
         """
         refElement = etree.Element(nspath_eval('wps:Reference', namespaces),
                                    attrib={nspath_eval("xlink:href", namespaces): self.value})
+        if self.encoding:
+            refElement.set('encoding', self.encoding)
+        if self.schema:
+            refElement.set('schema', self.schema)
+        if self.mimeType:
+            refElement.set('mimeType', self.mimeType)
         return refElement
 
     def complexDataRaw(self):
@@ -1369,25 +2098,76 @@ class ComplexDataInput(IComplexDataInput, ComplexData):
         '''
         dataElement = etree.Element(nspath_eval('wps:Data', namespaces))
 
-        attrib = dict()
+        if self.version == '1.0.0':
+            complexDataElement = etree.SubElement(
+                dataElement, nspath_eval('wps:ComplexData', namespaces))
+        else:
+            # WPS 2.0.0:
+            # - There is no intermediary <wps:ComplexData> element
+            # - The mimeType, encoding, schema are attributes of <wps:Data>
+            complexDataElement = dataElement
+
         if self.encoding:
-            attrib['encoding'] = self.encoding
+            complexDataElement.set('encoding', self.encoding)
         if self.schema:
-            attrib['schema'] = self.schema
+            complexDataElement.set('schema', self.schema)
         if self.mimeType:
-            attrib['mimeType'] = self.mimeType
-        complexDataElement = etree.SubElement(
-            dataElement, nspath_eval('wps:ComplexData', namespaces), attrib=attrib)
-        # complexDataElement.text = self.value
+            complexDataElement.set('mimeType', self.mimeType)
+        
+        # TODO: BV 2018-04-20 Check why this has happened: AttributeError: 'module' object has no attribute 'XMLSyntaxError'
+
         # If ComplexDataInput is valid XML, append the XML in the ComplexData node of the request
         try:
             xml_input_data = etree.fromstring(self.value)
             complexDataElement.append(xml_input_data)
         # If not valid XML, append the text in a CDATA
-        except etree.XMLSyntaxError:
-            complexDataElement.text = etree.CDATA( self.value )
+        except etree.XMLSyntaxError as ex:
+            print ("Data: %s" % self.value)
+            print ("Warning: %s => Enclosing it as CDATA" % ex)
+            #complexDataElement.text = etree.CDATA(self.value)
+            complexDataElement.text = self.value
 
         return dataElement
+
+
+class BoundingBoxInput(ILiteralDataInput, DataFormat):
+
+    # WPS 2.0.0
+    # <ows:BoundingBox crs="EPSG:4326">
+    #   <ows:LowerCorner>51.9 7.0</ows:LowerCorner>
+    #   <ows:UpperCorner>53.0 8.0</ows:UpperCorner>
+    # </ows:BoundingBox>
+
+    # <ows:BoundingBox crs="http://www.opengis.net/def/crs/EPSG/0/4258">
+    #   <ows:LowerCorner>51.9 7.0</ows:LowerCorner>
+    #   <ows:UpperCorner>53.0 8.0</ows:UpperCorner>
+    # </ows:BoundingBox>
+
+    def __init__(self, value, data_format=None, version=None):
+        '''
+        Initialize a new BoundingBoxInput instance.
+        :param value: The bounding box value, expressed as a coma separated string (e.g. '51.9,7.0,53.0,8.0,EPSG:4326')
+        :param data_form: Optional DataFormat instance for providing mime-type, encoding, schema, etc. values
+        '''
+        super(BoundingBoxInput, self).__init__(data_format=data_format)
+        self.value = value
+
+    def getXml(self):
+        root = etree.Element(nspath_eval('wps:BoundingBox', namespaces))
+        #, attrib={nspath_eval("crs", namespaces): self.defaultCRS})
+        lower_corner = etree.SubElement(root, nspath_eval('ows:LowerCorner', namespaces))
+        upper_corner = etree.SubElement(root, nspath_eval('ows:UpperCorner', namespaces))
+
+        split_value = self.value.split(',')
+        if len(split_value) >= 4:
+            # The first four values are the coordinates of the corners
+            lower_corner.text = '%s %s' % (split_value[0], split_value[1])
+            upper_corner.text = '%s %s' % (split_value[2], split_value[3])
+            if len(split_value) == 5:
+                # The fifth value is the CRS
+                root.set("crs", split_value[4])
+
+        return root
 
 
 class FeatureCollection(IComplexDataInput):
@@ -1400,8 +2180,8 @@ class FeatureCollection(IComplexDataInput):
     Implements IComplexDataInput.
     '''
 
-    def __init__(self):
-        pass
+    def __init__(self, version=WPS_DEFAULT_VERSION):
+        self.version = version
 
     def getXml(self):
         raise NotImplementedError
@@ -1413,7 +2193,7 @@ class WFSFeatureCollection(FeatureCollection):
     FeatureCollection specified by a WFS query.
     All subclasses must implement the getQuery() method to provide the specific query portion of the XML.
     '''
-    def __init__(self, wfsUrl, wfsQuery, wfsMethod=None):
+    def __init__(self, wfsUrl, wfsQuery, wfsMethod=None, version=WPS_DEFAULT_VERSION):
         '''
         wfsUrl: the WFS service URL
                 example: wfsUrl = "http://igsarm-cida-gdp2.er.usgs.gov:8082/geoserver/wfs"
@@ -1422,6 +2202,8 @@ class WFSFeatureCollection(FeatureCollection):
         self.url = wfsUrl
         self.query = wfsQuery
         self.method = wfsMethod
+        self.version = version
+
     #    <wps:Reference xlink:href="http://igsarm-cida-gdp2.er.usgs.gov:8082/geoserver/wfs">
     #      <wps:Body>
     #        <wfs:GetFeature xmlns:wfs="http://www.opengis.net/wfs" xmlns:ogc="http://www.opengis.net/ogc" xmlns:gml="http://www.opengis.net/gml" service="WFS" version="1.1.0" outputFormat="text/xml; subtype=gml/3.1.1" xsi:schemaLocation="http://www.opengis.net/wfs ../wfs/1.1.0/WFS.xsd">
@@ -1450,7 +2232,7 @@ class WFSFeatureCollection(FeatureCollection):
         #                    <ogc:GmlObjectId gml:id="CONUS_States.508"/>
         #                </ogc:Filter>
         #            </wfs:Query>
-        getFeatureElement.append(self.query.getXml())
+        getFeatureElement.append(self.query.getXml(version=self.version))
 
         return root
 
@@ -1463,10 +2245,11 @@ class WFSQuery(IComplexDataInput):
     Implements IComplexDataInput.
     '''
 
-    def __init__(self, typeName, propertyNames=[], filters=[]):
+    def __init__(self, typeName, propertyNames=[], filters=[], version=WPS_DEFAULT_VERSION):
         self.typeName = typeName
         self.propertyNames = propertyNames
         self.filters = filters
+        self.version = version
 
     def getXml(self):
 
@@ -1500,13 +2283,14 @@ class GMLMultiPolygonFeatureCollection(FeatureCollection):
     Class that represents a FeatureCollection defined as a GML multi-polygon.
     '''
 
-    def __init__(self, polygons):
+    def __init__(self, polygons, version=WPS_DEFAULT_VERSION):
         '''
         Initializer accepts an array of polygons, where each polygon is an array of (lat,lon) tuples.
         Example: polygons = [ [(-102.8184, 39.5273), (-102.8184, 37.418), (-101.2363, 37.418), (-101.2363, 39.5273), (-102.8184, 39.5273)],
                               [(-92.8184, 39.5273), (-92.8184, 37.418), (-91.2363, 37.418), (-91.2363, 39.5273), (-92.8184, 39.5273)] ]
         '''
         self.polygons = polygons
+        self.version = version
 
     def getXml(self):
         '''
@@ -1586,10 +2370,15 @@ def monitorExecution(execution, sleepSecs=3, download=False, filepath=None):
     '''
 
     while execution.isComplete() == False:
+        print ('Going to check the execution status ...')
         execution.checkStatus(sleepSecs=sleepSecs)
         log.info('Execution status: %s' % execution.status)
 
     if execution.isSucceded():
+
+        # Issue a GetResult request to obtain the process outputs
+        execution.getResult()
+
         if download:
             execution.getOutput(filepath=filepath)
         else:
@@ -1607,9 +2396,10 @@ def printValue(value):
     Utility method to format a value for printing.
     '''
 
-    # ComplexData type
-    if isinstance(value, ComplexData):
-        return "mimeType=%s, encoding=%s, schema=%s" % (value.mimeType, value.encoding, value.schema)
+    # DataFormat type
+    if isinstance(value, DataFormat):
+        return "mimeType=%s, encoding=%s, schema=%s, maximumMegabytes=%s" \
+               % (value.mimeType, value.encoding, value.schema, value.maximumMegabytes)
     # other type
     else:
         return value
@@ -1624,12 +2414,15 @@ def printInputOutput(value, indent=''):
     print('%s identifier=%s, title=%s, abstract=%s, data type=%s' %
           (indent, value.identifier, value.title, value.abstract, value.dataType))
     for val in value.allowedValues:
-        print('%s Allowed Value: %s' % (indent, printValue(val)))
+        print('%s Allowed Format: %s' % (indent, printValue(val)))
     if value.anyValue:
-        print(' Any value allowed')
+        print(' Any format allowed')
     for val in value.supportedValues:
-        print('%s Supported Value: %s' % (indent, printValue(val)))
-    print('%s Default Value: %s ' % (indent, printValue(value.defaultValue)))
+        print('%s Supported Format: %s' % (indent, printValue(val)))
+    print('%s Default Format: %s ' % (indent, printValue(value.defaultValue)))
+    for val in value.supportedCRS:
+        print('%s Supported CRS: %s' % (indent, printValue(val)))
+    print('%s Default CRS: %s ' % (indent, printValue(value.defaultCRS)))
 
     # Input fields
     if isinstance(value, Input):
@@ -1641,4 +2434,5 @@ def printInputOutput(value, indent=''):
         print('%s reference=%s, mimeType=%s' %
               (indent, value.reference, value.mimeType))
         for datum in value.data:
-            print('%s Data Value: %s' % (indent, printValue(datum)))
+            print('%s Data Format: %s' % (indent, printValue(datum)))
+
